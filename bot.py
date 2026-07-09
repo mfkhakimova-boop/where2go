@@ -38,6 +38,47 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=os.environ["TELEGRAM_TOKEN"])
 dp = Dispatcher()
 
+# --- Приватность: белый список чатов ---
+# В переменной окружения ALLOWED_CHATS перечисли ID чатов через запятую,
+# например: -1001234567890, 987654321
+# Если переменная пустая или не задана — бот отвечает всем (открытый режим).
+_raw_allowed = os.environ.get("ALLOWED_CHATS", "").strip()
+ALLOWED_CHATS: set[int] = {
+    int(x) for x in _raw_allowed.split(",") if x.strip().lstrip("-").isdigit()
+}
+
+# --- Админы: кто может добавлять и удалять заведения ---
+# В переменной ADMINS перечисли user ID через запятую (см. команду /id).
+# Если переменная пустая — добавлять/удалять может любой (открытый режим).
+_raw_admins = os.environ.get("ADMINS", "").strip()
+ADMINS: set[int] = {
+    int(x) for x in _raw_admins.split(",") if x.strip().lstrip("-").isdigit()
+}
+
+
+def is_admin(user_id: int) -> bool:
+    return not ADMINS or user_id in ADMINS
+
+
+@dp.message.middleware()
+async def whitelist_messages(handler, event, data):
+    # /id работает всегда — иначе не узнать ID чата, чтобы его разрешить
+    text = (event.text or "")
+    if text == "/id" or text.startswith("/id@") or text.startswith("/id "):
+        return await handler(event, data)
+    if ALLOWED_CHATS and event.chat.id not in ALLOWED_CHATS:
+        return  # молча игнорируем чужие чаты
+    return await handler(event, data)
+
+
+@dp.callback_query.middleware()
+async def whitelist_callbacks(handler, event, data):
+    if ALLOWED_CHATS and event.message.chat.id not in ALLOWED_CHATS:
+        await event.answer()
+        return
+    return await handler(event, data)
+
+
 # Активные голосования: chat_id -> состояние
 # votes[category][option] = set(user_id) — чтобы один человек не голосовал дважды
 active_votes: dict[int, dict] = {}
@@ -104,8 +145,22 @@ async def cmd_help(message: Message):
     await message.answer(HELP_TEXT, parse_mode="HTML")
 
 
+@dp.message(Command("id"))
+async def cmd_id(message: Message):
+    await message.answer(
+        f"ID этого чата: <code>{message.chat.id}</code>\n"
+        f"Твой user ID: <code>{message.from_user.id}</code>\n\n"
+        "Чат — в ALLOWED_CHATS (где бот работает),\n"
+        "user ID — в ADMINS (кто может /add и /del).",
+        parse_mode="HTML",
+    )
+
+
 @dp.message(Command("add"))
 async def cmd_add(message: Message, command: CommandObject):
+    if not is_admin(message.from_user.id):
+        await message.answer("Добавлять заведения могут только хранители базы 🙂")
+        return
     raw = (command.args or "").strip()
     if not raw:
         await message.answer(
@@ -152,6 +207,9 @@ async def cmd_list(message: Message):
 
 @dp.message(Command("del"))
 async def cmd_del(message: Message, command: CommandObject):
+    if not is_admin(message.from_user.id):
+        await message.answer("Удалять заведения могут только хранители базы 🙂")
+        return
     arg = (command.args or "").strip()
     if not arg.isdigit():
         await message.answer("Укажи id: <code>/del 3</code>", parse_mode="HTML")
