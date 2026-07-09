@@ -1,0 +1,255 @@
+"""
+Where2Go — телеграм-бот для выбора заведения голосованием. Версия без ИИ.
+
+Команды:
+  /add <разметка>  — добавить заведение (формат см. /help или в parse.py)
+  /list            — показать что есть в базе
+  /del <id>        — удалить заведение
+  /vote            — запустить голосование по критериям
+  /help            — справка
+
+Голосование: бот шлёт сообщение с кнопками по категориям (кухня, алкоголь,
+бюджет, атмосфера). Каждый тыкает свои варианты. Кто-то жмёт «Готово» —
+бот считает голоса и выдаёт топ-3 из базы.
+"""
+import asyncio
+import logging
+import os
+from collections import defaultdict
+
+from dotenv import load_dotenv
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import Command, CommandObject
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
+
+import db
+from parse import parse_add
+from config import CUISINES, DRINKS, BUDGETS, VIBES, TOP_N
+from matcher import top_places
+
+load_dotenv()
+logging.basicConfig(level=logging.INFO)
+
+bot = Bot(token=os.environ["TELEGRAM_TOKEN"])
+dp = Dispatcher()
+
+# Активные голосования: chat_id -> состояние
+# votes[category][option] = set(user_id) — чтобы один человек не голосовал дважды
+active_votes: dict[int, dict] = {}
+
+
+# ---------- Клавиатура голосования ----------
+
+CATEGORIES = {
+    "cuisine": ("🍽 Кухня", CUISINES),
+    "drink": ("🍷 Напитки", DRINKS),
+    "budget": ("💰 Чек", BUDGETS),
+    "vibe": ("✨ Атмосфера", VIBES),
+}
+
+
+def build_keyboard(chat_id: int) -> InlineKeyboardMarkup:
+    """Строит клавиатуру с текущим числом голосов на каждой кнопке."""
+    state = active_votes[chat_id]["votes"]
+    rows = []
+    for cat_key, (cat_title, options) in CATEGORIES.items():
+        rows.append([InlineKeyboardButton(text=f"— {cat_title} —", callback_data="noop")])
+        row = []
+        for opt in options:
+            n = len(state[cat_key].get(opt, set()))
+            label = f"{opt} · {n}" if n else opt
+            row.append(InlineKeyboardButton(
+                text=label,
+                callback_data=f"v|{cat_key}|{opt}",
+            ))
+            if len(row) == 2:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+    rows.append([InlineKeyboardButton(text="✅ Готово — показать топ", callback_data="done")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def empty_votes() -> dict:
+    return {cat: defaultdict(set) for cat in CATEGORIES}
+
+
+# ---------- Команды ----------
+
+HELP_TEXT = (
+    "Привет! Я помогаю выбрать, куда пойти 🥂\n\n"
+    "<b>Команды:</b>\n"
+    "/add — добавить заведение\n"
+    "/list — что есть в базе\n"
+    "/del &lt;id&gt; — удалить заведение\n"
+    "/vote — запустить голосование\n\n"
+    "<b>Как добавлять (/add):</b>\n"
+    "Одной строкой через <code>|</code>, 7 полей:\n"
+    "<code>Название | Район | кухни | напитки | чек | атмосфера | описание</code>\n\n"
+    "Пример:\n"
+    "<code>/add Траттория | центр | итальянская | вино:3, коктейли:1 | 2000–3500 | тихо / свидание | Паста и большая карта вин</code>\n\n"
+    "Напитки — как <code>напиток:оценка</code> от 0 до 3.\n"
+    "Обычный сценарий: накидайте заведений через /add, потом /vote."
+)
+
+
+@dp.message(Command("start", "help"))
+async def cmd_help(message: Message):
+    await message.answer(HELP_TEXT, parse_mode="HTML")
+
+
+@dp.message(Command("add"))
+async def cmd_add(message: Message, command: CommandObject):
+    raw = (command.args or "").strip()
+    if not raw:
+        await message.answer(
+            "Пришли разметку одной строкой. Формат:\n"
+            "<code>Название | Район | кухни | напитки | чек | атмосфера | описание</code>\n\n"
+            "Подробнее — /help",
+            parse_mode="HTML",
+        )
+        return
+    try:
+        data = parse_add(raw)
+        data["added_by"] = message.from_user.full_name
+        place_id = await asyncio.to_thread(db.add_place, data)
+        cuisines = ", ".join(data.get("cuisines", [])) or "—"
+        drinks = ", ".join(f"{k}({v})" for k, v in data.get("drinks", {}).items()) or "—"
+        await message.answer(
+            f"✅ Добавила <b>{data['name']}</b> (id {place_id})\n"
+            f"Кухня: {cuisines}\n"
+            f"Напитки: {drinks}\n"
+            f"Чек: {data.get('budget') or '—'}\n"
+            f"Район: {data.get('district') or '—'}\n"
+            f"Атмосфера: {', '.join(data.get('vibes', [])) or '—'}",
+            parse_mode="HTML",
+        )
+    except ValueError as e:
+        await message.answer(f"⚠️ {e}")
+    except Exception as e:
+        logging.exception("add failed")
+        await message.answer(f"Не получилось добавить 😕\n{e}")
+
+
+@dp.message(Command("list"))
+async def cmd_list(message: Message):
+    places = await asyncio.to_thread(db.get_all_places)
+    if not places:
+        await message.answer("База пока пустая. Добавь заведение через /add")
+        return
+    lines = []
+    for p in places:
+        cuisines = ", ".join(p["cuisines"]) or "—"
+        lines.append(f"<b>{p['id']}. {p['name']}</b> — {cuisines}, чек {p['budget'] or '—'}")
+    await message.answer("<b>В базе:</b>\n" + "\n".join(lines), parse_mode="HTML")
+
+
+@dp.message(Command("del"))
+async def cmd_del(message: Message, command: CommandObject):
+    arg = (command.args or "").strip()
+    if not arg.isdigit():
+        await message.answer("Укажи id: <code>/del 3</code>", parse_mode="HTML")
+        return
+    ok = await asyncio.to_thread(db.delete_place, int(arg))
+    await message.answer("Удалила ✅" if ok else "Такого id нет.")
+
+
+@dp.message(Command("vote"))
+async def cmd_vote(message: Message):
+    n = await asyncio.to_thread(db.count_places)
+    if n == 0:
+        await message.answer("Сначала добавьте заведения через /add 🙂")
+        return
+    active_votes[message.chat.id] = {"votes": empty_votes()}
+    await message.answer(
+        "🗳 <b>Куда идём?</b> Тыкайте что хочется (можно несколько вариантов).\n"
+        "Когда все проголосуют — жмите «Готово».",
+        parse_mode="HTML",
+        reply_markup=build_keyboard(message.chat.id),
+    )
+
+
+# ---------- Обработка нажатий ----------
+
+@dp.callback_query(F.data == "noop")
+async def cb_noop(cb: CallbackQuery):
+    await cb.answer()
+
+
+@dp.callback_query(F.data.startswith("v|"))
+async def cb_vote(cb: CallbackQuery):
+    chat_id = cb.message.chat.id
+    if chat_id not in active_votes:
+        await cb.answer("Это голосование уже завершено. Запустите /vote заново.", show_alert=True)
+        return
+
+    _, cat, opt = cb.data.split("|", 2)
+    user_id = cb.from_user.id
+    voters = active_votes[chat_id]["votes"][cat][opt]
+
+    if user_id in voters:
+        voters.discard(user_id)
+        await cb.answer("Голос убран")
+    else:
+        voters.add(user_id)
+        await cb.answer("Голос учтён ✅")
+
+    await cb.message.edit_reply_markup(reply_markup=build_keyboard(chat_id))
+
+
+@dp.callback_query(F.data == "done")
+async def cb_done(cb: CallbackQuery):
+    chat_id = cb.message.chat.id
+    if chat_id not in active_votes:
+        await cb.answer()
+        return
+
+    raw = active_votes[chat_id]["votes"]
+    votes = {
+        cat: {opt: len(users) for opt, users in opts.items() if users}
+        for cat, opts in raw.items()
+    }
+
+    total = sum(len(u) for opts in raw.values() for u in opts.values())
+    if total == 0:
+        await cb.answer("Никто ещё не проголосовал 🙂", show_alert=True)
+        return
+
+    places = await asyncio.to_thread(db.get_all_places)
+    top = top_places(places, votes, TOP_N)
+
+    if not top:
+        await cb.message.edit_text("Под такие пожелания в базе ничего не нашлось 😔")
+        del active_votes[chat_id]
+        await cb.answer()
+        return
+
+    medals = ["🥇", "🥈", "🥉"]
+    lines = ["<b>Вот куда стоит пойти:</b>\n"]
+    for i, (p, sc) in enumerate(top):
+        medal = medals[i] if i < len(medals) else "•"
+        lines.append(
+            f"{medal} <b>{p['name']}</b>\n"
+            f"{', '.join(p['cuisines'])} · чек {p['budget'] or '—'}\n"
+            f"<i>{p['summary']}</i>\n"
+        )
+    await cb.message.edit_text("\n".join(lines), parse_mode="HTML",
+                               disable_web_page_preview=True)
+    del active_votes[chat_id]
+    await cb.answer("Готово!")
+
+
+async def main():
+    db.init_db()
+    logging.info("Bot started")
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
