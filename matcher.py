@@ -3,7 +3,7 @@
 На вход — сколько голосов набрал каждый критерий.
 На выходе — топ-N заведений с максимальным score.
 """
-from config import WEIGHTS, TOP_N
+from config import WEIGHTS, TOP_N, BUDGETS
 
 
 def score_place(place: dict, votes: dict) -> float:
@@ -29,7 +29,7 @@ def score_place(place: dict, votes: dict) -> float:
         score += n * strength / 3.0 * WEIGHTS["drink"]
 
     # Бюджет: точное совпадение — полный вес, соседняя категория — половина
-    budgets_order = ["до 1000", "1000–2000", "2000–3500", "3500+"]
+    budgets_order = BUDGETS
     for budget, n in votes.get("budget", {}).items():
         if budget == place["budget"]:
             score += n * WEIGHTS["budget"]
