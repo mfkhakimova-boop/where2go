@@ -53,7 +53,13 @@ WEIGHTS = {
 }
 
 # Модель Anthropic для агента /discover
-CLAUDE_MODEL = "claude-sonnet-4-6"
+# Haiku — быстрая и дешёвая, для поиска и разметки по шаблону хватает.
+# Если разметка покажется слабой — верни "claude-sonnet-4-6" (дороже, умнее).
+CLAUDE_MODEL = "claude-haiku-4-5-20251001"
+
+# Экономия на /discover
+DISCOVER_MAX_SEARCHES = 3   # веб-поисков за один вызов (главный расход)
+DISCOVER_MAX_PLACES = 2     # сколько кандидатов просить
 
 # Сколько заведений показывать в результате
 TOP_N = 5
