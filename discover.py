@@ -7,7 +7,10 @@
 import json
 import os
 from anthropic import Anthropic
-from config import CUISINES, DRINKS, BUDGETS, VIBES, CLAUDE_MODEL
+from config import (
+    CUISINES, DRINKS, BUDGETS, VIBES, CLAUDE_MODEL,
+    DISCOVER_MAX_SEARCHES, DISCOVER_MAX_PLACES,
+)
 
 _client = None
 
@@ -31,9 +34,10 @@ PROMPT = """Ты помогаешь компании друзей в Алмат�
 
 Заведения, которые УЖЕ есть в базе (их предлагать НЕ надо): {existing}
 
-Используй веб-поиск: найди до 3 реально существующих заведений в Алматы,
-подходящих под запрос. Проверь, что они работают (не закрылись). Изучи
-меню и отзывы, чтобы оценки были честными.
+Используй веб-поиск ЭКОНОМНО (максимум {max_searches} запроса — лучше один
+широкий, чем несколько узких): найди до {max_places} реально существующих
+заведений в Алматы, подходящих под запрос. Проверь, что они работают
+(не закрылись). Оценки давай по найденному, без лишних уточняющих поисков.
 
 Верни СТРОГО JSON-массив без пояснений и markdown-обёртки:
 
@@ -63,16 +67,18 @@ def discover_places(query: str, existing_names: list[str]) -> list[dict]:
         cuisines=CUISINES,
         budgets=BUDGETS,
         vibes=VIBES,
+        max_searches=DISCOVER_MAX_SEARCHES,
+        max_places=DISCOVER_MAX_PLACES,
     )
 
     resp = client().messages.create(
         model=CLAUDE_MODEL,
-        max_tokens=2500,
+        max_tokens=1800,
         messages=[{"role": "user", "content": prompt}],
         tools=[{
             "type": "web_search_20250305",
             "name": "web_search",
-            "max_uses": 8,
+            "max_uses": DISCOVER_MAX_SEARCHES,
         }],
     )
 
@@ -94,4 +100,4 @@ def discover_places(query: str, existing_names: list[str]) -> list[dict]:
             continue
         c.setdefault("url", "")
         result.append(c)
-    return result[:3]
+    return result[:DISCOVER_MAX_PLACES]
