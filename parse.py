@@ -28,6 +28,7 @@ def parse_add(text: str) -> dict:
         )
 
     name, district, cuisines_s, drinks_s, budget, vibes_s, summary = parts[:7]
+    city = parts[7].strip() if len(parts) > 7 and parts[7].strip() else "Алматы"
 
     if not name:
         raise ValueError("У заведения должно быть название (первое поле).")
@@ -60,4 +61,5 @@ def parse_add(text: str) -> dict:
         "busy": "",
         "summary": summary,
         "url": "",
+        "city": city,
     }
