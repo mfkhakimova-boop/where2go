@@ -98,7 +98,23 @@ CATEGORIES = {
 def build_keyboard(chat_id: int) -> InlineKeyboardMarkup:
     """Строит клавиатуру с текущим числом голосов на каждой кнопке."""
     state = active_votes[chat_id]["votes"]
+    cities = active_votes[chat_id].get("cities", [])
     rows = []
+
+    # Город — динамическая категория, показываем только если городов > 1
+    if len(cities) > 1:
+        rows.append([InlineKeyboardButton(text="— 🏙 Город —", callback_data="noop")])
+        row = []
+        for c in cities:
+            n = len(state["city"].get(c, set()))
+            label = f"{c} · {n}" if n else c
+            row.append(InlineKeyboardButton(text=label, callback_data=f"v|city|{c}"))
+            if len(row) == 2:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+
     for cat_key, (cat_title, options) in CATEGORIES.items():
         rows.append([InlineKeyboardButton(text=f"— {cat_title} —", callback_data="noop")])
         row = []
@@ -119,7 +135,9 @@ def build_keyboard(chat_id: int) -> InlineKeyboardMarkup:
 
 
 def empty_votes() -> dict:
-    return {cat: defaultdict(set) for cat in CATEGORIES}
+    votes = {cat: defaultdict(set) for cat in CATEGORIES}
+    votes["city"] = defaultdict(set)
+    return votes
 
 
 # ---------- Команды ----------
@@ -144,7 +162,9 @@ ADMIN_HELP_TEXT = (
     "Напитки — как <code>напиток:оценка</code> от 0 до 3. Пример:\n"
     "<code>/add Траттория | центр | итальянская | вино:3, коктейли:1 | 10к–15к | тихо / свидание | Паста и большая карта вин</code>\n"
     "/del &lt;id&gt; — удалить заведение (id смотри в /list)\n"
-    "/discover &lt;что ищем&gt; — ИИ-разведка: найдёт места по городу и предложит в базу"
+    "/discover &lt;что хочется&gt; — ИИ-разведка свободной фразой, можно с городом "
+    "(«рэйв в Берлине»); без города ищет в Алматы\n"
+    "В /add город — необязательное 8-е поле (по умолчанию Алматы)"
 )
 
 
@@ -210,9 +230,11 @@ async def cmd_list(message: Message):
         await message.answer("База пока пустая. Добавь заведение через /add")
         return
     lines = []
+    multi_city = len({p.get("city", "Алматы") for p in places}) > 1
     for p in places:
         cuisines = ", ".join(p["cuisines"]) or "—"
-        lines.append(f"<b>{p['id']}. {p['name']}</b> — {cuisines}, чек {p['budget'] or '—'}")
+        city_tag = f" · {p.get('city', 'Алматы')}" if multi_city else ""
+        lines.append(f"<b>{p['id']}. {p['name']}</b>{city_tag} — {cuisines}, чек {p['budget'] or '—'}")
     await message.answer("<b>В базе:</b>\n" + "\n".join(lines), parse_mode="HTML")
 
 
@@ -240,7 +262,7 @@ def _fmt_candidate(c: dict) -> str:
     drinks = ", ".join(f"{k}:{v}" for k, v in c.get("drinks", {}).items() if v) or "—"
     conf = "" if c.get("confidence") == "high" else "\n⚠️ <i>не уверена, что данные свежие — проверьте перед походом</i>"
     return (
-        f"<b>{c['name']}</b> · {c.get('district') or '—'}\n"
+        f"<b>{c['name']}</b> · {c.get('city', 'Алматы')}, {c.get('district') or '—'}\n"
         f"{', '.join(c.get('cuisines', [])) or '—'} · чек {c.get('budget') or '—'}\n"
         f"Напитки: {drinks}\n"
         f"Атмосфера: {', '.join(c.get('vibes', [])) or '—'}\n"
@@ -257,26 +279,30 @@ async def cmd_discover(message: Message, command: CommandObject):
     query = (command.args or "").strip()
     if not query:
         await message.answer(
-            "Опиши, что ищем: <code>/discover винный бар с закусками в центре</code>",
+            "Опиши свободно, что ищем: <code>/discover хочу жестко затусить на рэйве в Берлине</code>\n"
+            "Город не указан — ищу в Алматы.",
             parse_mode="HTML",
         )
         return
 
-    wait = await message.answer("🕵️‍♀️ Ищу по городу, это займёт до минуты…")
+    wait = await message.answer("🕵️‍♀️ Ищу, это займёт до минуты…")
     try:
         places = await asyncio.to_thread(db.get_all_places)
         existing = [p["name"] for p in places]
-        found = await asyncio.to_thread(discover.discover_places, query, existing)
+        city, found = await asyncio.to_thread(discover.discover_places, query, existing)
     except Exception as e:
         logging.exception("discover failed")
         await wait.edit_text(f"Поиск не удался 😕\n{e}")
         return
 
     if not found:
-        await wait.edit_text("Ничего надёжного под запрос не нашла. Попробуй переформулировать.")
+        await wait.edit_text(
+            f"В городе {city} ничего надёжного под запрос не нашла. "
+            "Попробуй переформулировать."
+        )
         return
 
-    await wait.edit_text(f"Нашла {len(found)} — решай по каждому:")
+    await wait.edit_text(f"Нашла в городе {city} — решай по каждому:")
     for c in found:
         _candidate_seq += 1
         key = str(_candidate_seq)
@@ -327,7 +353,8 @@ async def cmd_vote(message: Message):
     if n == 0:
         await message.answer("Сначала добавьте заведения через /add 🙂")
         return
-    active_votes[message.chat.id] = {"votes": empty_votes()}
+    cities = await asyncio.to_thread(db.get_cities)
+    active_votes[message.chat.id] = {"votes": empty_votes(), "cities": cities}
     await message.answer(
         "🗳 <b>Куда идём?</b> Тыкайте что хочется (можно несколько вариантов).\n"
         "Когда все проголосуют — жмите «Готово».",
@@ -383,6 +410,16 @@ async def cb_done(cb: CallbackQuery):
         return
 
     places = await asyncio.to_thread(db.get_all_places)
+
+    # Город: фильтруем по победителю голосования (если за города голосовали)
+    city_votes = votes.pop("city", {})
+    chosen_city = None
+    if city_votes:
+        max_v = max(city_votes.values())
+        winners = [c for c, n in city_votes.items() if n == max_v]
+        chosen_city = winners[0]
+        places = [p for p in places if p.get("city") == chosen_city]
+
     top = top_places(places, votes, TOP_N)
 
     if not top:
@@ -392,7 +429,8 @@ async def cb_done(cb: CallbackQuery):
         return
 
     medals = ["🥇", "🥈", "🥉"]
-    lines = ["<b>Вот куда стоит пойти:</b>\n"]
+    header = f"<b>Вот куда стоит пойти{' в ' + chosen_city if chosen_city else ''}:</b>\n"
+    lines = [header]
     for i, (p, sc) in enumerate(top):
         medal = medals[i] if i < len(medals) else "•"
         lines.append(
