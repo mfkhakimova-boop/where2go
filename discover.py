@@ -28,39 +28,51 @@ def client() -> Anthropic:
     return _client
 
 
-PROMPT = """Ты помогаешь компании друзей в Алматы найти заведения под запрос.
+PROMPT = """Ты помогаешь компании друзей выбрать заведение. Они пишут
+свободной фразой, например «хочу жестко затусить на рэйве в Берлине»
+или «винный бар с закусками».
 
 Запрос: {query}
+
+Сначала определи ГОРОД из запроса. Если город в запросе не упомянут —
+город {default_city}.
 
 Заведения, которые УЖЕ есть в базе (их предлагать НЕ надо): {existing}
 
 Используй веб-поиск ЭКОНОМНО (максимум {max_searches} запроса — лучше один
 широкий, чем несколько узких): найди до {max_places} реально существующих
-заведений в Алматы, подходящих под запрос. Проверь, что они работают
-(не закрылись). Оценки давай по найденному, без лишних уточняющих поисков.
+заведений в определённом городе, подходящих под суть запроса. Проверь,
+что они работают (не закрылись). Оценки давай по найденному, без лишних
+уточняющих поисков.
 
-Верни СТРОГО JSON-массив без пояснений и markdown-обёртки:
+Верни СТРОГО JSON-объект без пояснений и markdown-обёртки:
 
-[
-  {{
-    "name": "название",
-    "district": "район или пересечение улиц",
-    "cuisines": [подмножество из {cuisines}],
-    "drinks": {{"вино": 0-3, "пиво": 0-3, "коктейли": 0-3, "крафт": 0-3, "без алкоголя": 0-3}},
-    "budget": одно из {budgets},
-    "vibes": [подмножество из {vibes}],
-    "busy": "пара слов о загруженности, если известно, иначе пустая строка",
-    "summary": "2-3 предложения СВОИМИ словами: чем место хорошо, что попробовать. Не копируй чужие тексты.",
-    "confidence": "high или low — насколько уверен, что данные актуальны"
-  }}
-]
+{{
+  "city": "определённый город",
+  "places": [
+    {{
+      "name": "название",
+      "district": "район или пересечение улиц",
+      "cuisines": [подмножество из {cuisines}],
+      "drinks": {{"вино": 0-3, "пиво": 0-3, "коктейли": 0-3, "крафт": 0-3, "без алкоголя": 0-3}},
+      "budget": одно из {budgets},
+      "vibes": [подмножество из {vibes}],
+      "busy": "пара слов о загруженности, если известно, иначе пустая строка",
+      "summary": "2-3 предложения СВОИМИ словами: чем место хорошо, что попробовать. Не копируй чужие тексты.",
+      "confidence": "high или low — насколько уверен, что данные актуальны"
+    }}
+  ]
+}}
 
-budget — средний чек в тенге на человека. Оценки drinks: 0 нет, 1 немного,
+budget — средний чек на человека в категориях (тенге); для городов вне
+Казахстана переведи местные цены в тенге примерно и подбери категорию.
+Оценки drinks: 0 нет, 1 немного,
 2 хороший выбор, 3 очень большой выбор. Если под запрос ничего надёжного
-не нашлось — верни пустой массив []. Только валидный JSON."""
+не нашлось — верни {{"city": "...", "places": []}}. Только валидный JSON."""
 
 
-def discover_places(query: str, existing_names: list[str]) -> list[dict]:
+def discover_places(query: str, existing_names: list[str], default_city: str = "Алматы") -> tuple[str, list[dict]]:
+    """Возвращает (город, список кандидатов). Город агент определяет из фразы."""
     prompt = PROMPT.format(
         query=query,
         existing=", ".join(existing_names) or "пока пусто",
@@ -69,6 +81,7 @@ def discover_places(query: str, existing_names: list[str]) -> list[dict]:
         vibes=VIBES,
         max_searches=DISCOVER_MAX_SEARCHES,
         max_places=DISCOVER_MAX_PLACES,
+        default_city=default_city,
     )
 
     resp = client().messages.create(
@@ -84,11 +97,14 @@ def discover_places(query: str, existing_names: list[str]) -> list[dict]:
 
     text = "".join(b.text for b in resp.content if b.type == "text").strip()
     text = text.replace("```json", "").replace("```", "").strip()
-    start = text.find("[")
-    end = text.rfind("]")
+    start = text.find("{")
+    end = text.rfind("}")
     if start == -1 or end == -1:
-        return []
-    candidates = json.loads(text[start:end + 1])
+        return default_city, []
+    data = json.loads(text[start:end + 1])
+
+    city = (data.get("city") or default_city).strip()
+    candidates = data.get("places", [])
 
     # защита от дублей по имени (без учёта регистра)
     existing_lower = {n.lower().strip() for n in existing_names}
@@ -99,5 +115,6 @@ def discover_places(query: str, existing_names: list[str]) -> list[dict]:
         if c["name"].lower().strip() in existing_lower:
             continue
         c.setdefault("url", "")
+        c["city"] = city
         result.append(c)
-    return result[:DISCOVER_MAX_PLACES]
+    return city, result[:DISCOVER_MAX_PLACES]
