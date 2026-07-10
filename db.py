@@ -41,6 +41,11 @@ def init_db():
                 added_by  TEXT
             )
         """)
+        # миграция: колонка city (существующим местам проставится Алматы)
+        con.execute(
+            "ALTER TABLE places ADD COLUMN IF NOT EXISTS city TEXT DEFAULT 'Алматы'"
+        )
+        con.execute("UPDATE places SET city = 'Алматы' WHERE city IS NULL")
         con.commit()
 
 
@@ -48,8 +53,8 @@ def add_place(data: dict) -> int:
     with _connect() as con:
         cur = con.execute(
             """INSERT INTO places
-               (name, url, district, cuisines, drinks, budget, vibes, busy, summary, added_by)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               (name, url, district, cuisines, drinks, budget, vibes, busy, summary, added_by, city)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                RETURNING id""",
             (
                 data.get("name", "Без названия"),
@@ -62,6 +67,7 @@ def add_place(data: dict) -> int:
                 data.get("busy", ""),
                 data.get("summary", ""),
                 data.get("added_by", ""),
+                (data.get("city") or "Алматы").strip(),
             ),
         )
         place_id = cur.fetchone()["id"]
@@ -89,7 +95,17 @@ def _row_to_dict(r: dict) -> dict:
         "vibes": load(r["vibes"], []),
         "busy": r["busy"],
         "summary": r["summary"],
+        "city": r.get("city") or "Алматы",
     }
+
+
+def get_cities() -> list[str]:
+    """Города, в которых есть хотя бы одно заведение."""
+    with _connect() as con:
+        rows = con.execute(
+            "SELECT DISTINCT city FROM places WHERE city IS NOT NULL ORDER BY city"
+        ).fetchall()
+        return [r["city"] for r in rows]
 
 
 def get_all_places() -> list[dict]:
