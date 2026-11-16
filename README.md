@@ -111,5 +111,5 @@ Environment variables (a local `.env` file works too):
 ## Author
 
 Munira Khakimova, systems analyst working on mobile products.
-telegram @thatsmoony
-linkedin https://www.linkedin.com/in/munira-khakimova-39a586237/
+- telegram: @thatsmoony
+- linkedin: https://www.linkedin.com/in/munira-khakimova-39a586237/
