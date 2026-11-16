@@ -3,7 +3,8 @@
 A Telegram bot that helps a group of friends agree on where to go out. Add it to the group chat, everyone taps what they feel like, and the bot ranks the places that fit the whole group.
 
 <img width="340" height="669" alt="demo" src="https://github.com/user-attachments/assets/a3d40e6c-43b4-4975-a15f-6568cae8c6c1" />
-<img width="1290" height="2796" alt="image" src="https://github.com/user-attachments/assets/1d7c9dc4-aca7-4d8f-8e1c-167e8e3e5a88" />
+
+<img width="340" height="669" alt="image" src="https://github.com/user-attachments/assets/1d7c9dc4-aca7-4d8f-8e1c-167e8e3e5a88" />
 
 
 ## The problem
